@@ -1,0 +1,3 @@
+[submodule "exercise_2/weather-proxy-cline"]
+	path = exercise_2/weather-proxy-cline
+	url = git@github.com:etitovets/weather-proxy-cline.git
