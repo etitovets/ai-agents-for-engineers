@@ -1,0 +1,50 @@
+[project]
+name = "news-pipeline"
+version = "0.1.0"
+description = "Russian RSS News NER Pipeline"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.115,<0.116",
+    "uvicorn[standard]>=0.32,<0.33",
+    "faststream[rabbit,cli]>=0.5.48,<0.6",
+    "pydantic>=2.9,<3.0",
+    "pydantic-settings>=2.3,<3.0",
+    "feedparser>=6.0,<7.0",
+    "httpx>=0.27,<0.28",
+    "aiosqlite>=0.20,<0.21",
+    "asyncpg>=0.29,<0.30",
+]
+
+[dependency-groups]
+worker = [
+    "spacy>=3.7.5,<3.8",
+    "numpy>=1.26.4,<2.0",
+    "ru-core-news-sm",
+]
+dev = [
+    "ruff>=0.8,<0.9",
+    "pytest>=8.3,<9.0",
+    "pytest-asyncio>=0.24,<0.25",
+]
+
+[tool.uv.sources]
+ru-core-news-sm = { url = "https://github.com/explosion/spacy-models/releases/download/ru_core_news_sm-3.7.0/ru_core_news_sm-3.7.0-py3-none-any.whl" }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "C"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/news_pipeline"]
