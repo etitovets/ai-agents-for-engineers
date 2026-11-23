@@ -3,3 +3,5 @@
 **/.env
 **/.pytest_cache/*
 **/.venv/*
+exercise_4/lesson_4
+**/__pycache__/
