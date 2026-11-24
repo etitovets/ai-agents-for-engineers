@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from oncall_mcp import repositories
-from oncall_mcp.errors import DataSourceUnavailable, InvalidArguments, NotFound
-from oncall_mcp.settings import Settings
+from incident_mcp import repositories
+from incident_mcp.errors import DataSourceUnavailable, InvalidArguments, NotFound
+from incident_mcp.settings import Settings
 
 
 @pytest.fixture

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from oncall_mcp.errors import DataSourceUnavailable
-from oncall_mcp.runtime import StandRuntime
-from oncall_mcp.settings import Settings
+from incident_mcp.errors import DataSourceUnavailable
+from incident_mcp.runtime import StandRuntime
+from incident_mcp.settings import Settings
 
 
 def unreachable_settings() -> Settings:

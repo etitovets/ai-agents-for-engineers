@@ -21,9 +21,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
-from oncall_mcp import repositories
-from oncall_mcp.errors import InvalidArguments
-from oncall_mcp.models import (
+from incident_mcp import repositories
+from incident_mcp.errors import InvalidArguments
+from incident_mcp.models import (
     MAX_METRIC_WINDOW,
     Bucket,
     LatencyResult,

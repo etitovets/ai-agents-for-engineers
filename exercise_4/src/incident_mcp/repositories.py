@@ -9,15 +9,16 @@ caller.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import psycopg
-from psycopg import sql
+from psycopg import AsyncConnection, sql
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
-from .errors import DataSourceUnavailable, InvalidArguments, NotFound
+from .errors import DataSourceUnavailable, InvalidArguments, InvalidTransition, NotFound
 from .models import (
     CATALOG_SERVICES,
     LOG_SERVICES,
@@ -28,9 +29,11 @@ from .models import (
     Deploy,
     DeploysResult,
     Incident,
+    IncidentAcknowledgeResult,
     IncidentResult,
     IncidentsResult,
     IncidentStatus,
+    IncidentSummaryResult,
     LatencyBucket,
     LatencyResult,
     LogEntry,
@@ -45,6 +48,7 @@ from .models import (
     bucket_count,
     require_endpoint,
     require_service,
+    require_summary,
 )
 from .settings import Settings
 
@@ -79,12 +83,40 @@ async def _fetch_one(
     return rows[0] if rows else None
 
 
+async def _in_write_transaction[T](
+    pool: AsyncConnectionPool,
+    operation: Callable[[AsyncConnection[dict[str, Any]]], Awaitable[T]],
+) -> T:
+    """Run one authorized write in an explicit read-write transaction.
+
+    Pooled connections keep ``default_transaction_read_only = on``; this helper
+    is the only place that switches a single transaction to read-write. The
+    database role remains the hard boundary: it may update only
+    ``incidents.status`` and ``incidents.summary``.
+    """
+
+    try:
+        async with pool.connection() as conn, conn.transaction():
+            await conn.execute("SET TRANSACTION READ WRITE")
+            return await operation(conn)
+    except PoolTimeout:
+        logger.warning("timed out acquiring a database connection for a write")
+        raise DataSourceUnavailable(
+            "the database connection pool is exhausted; retry shortly"
+        ) from None
+    except psycopg.Error as exc:
+        logger.warning("database write failed: %s", exc)
+        raise DataSourceUnavailable("the incident stand database write failed") from None
+
+
 def _split_page(rows: list[dict[str, Any]], limit: int) -> tuple[list[dict[str, Any]], bool]:
     has_more = len(rows) > limit
     return rows[:limit], has_more
 
 
 # --- incidents --------------------------------------------------------------
+
+_INCIDENT_COLUMNS = "id, service, severity, status, opened_at, title, summary"
 
 
 async def search_incidents(
@@ -143,6 +175,96 @@ async def get_incident(pool: AsyncConnectionPool, *, incident_id: str) -> Incide
     if row is None:
         raise NotFound(f"no incident with id {incident_id!r}")
     return IncidentResult(item=Incident(**row))
+
+
+async def acknowledge_incident(
+    pool: AsyncConnectionPool, *, incident_id: str
+) -> IncidentAcknowledgeResult:
+    """Move an open incident to ``acknowledged``.
+
+    Repeated acknowledgement is idempotent. A resolved incident cannot be
+    acknowledged. The row is locked so concurrent acknowledgements serialize
+    and the second caller observes ``changed=False``.
+    """
+
+    async def operation(conn: AsyncConnection[dict[str, Any]]) -> IncidentAcknowledgeResult:
+        cur = await conn.execute(
+            f"SELECT {_INCIDENT_COLUMNS} FROM incidents WHERE id = %(id)s FOR UPDATE",
+            {"id": incident_id},
+        )
+        row = await cur.fetchone()
+        if row is None:
+            raise NotFound(f"no incident with id {incident_id!r}")
+
+        previous = IncidentStatus(row["status"])
+        if previous is IncidentStatus.ACKNOWLEDGED:
+            return IncidentAcknowledgeResult(
+                item=Incident(**row), changed=False, previous_status=previous
+            )
+        if previous is not IncidentStatus.OPEN:
+            raise InvalidTransition(
+                f"cannot acknowledge incident {incident_id!r} in status {previous.value!r}"
+            )
+
+        cur = await conn.execute(
+            f"UPDATE incidents SET status = %(status)s WHERE id = %(id)s "
+            f"RETURNING {_INCIDENT_COLUMNS}",
+            {"id": incident_id, "status": IncidentStatus.ACKNOWLEDGED.value},
+        )
+        updated = await cur.fetchone()
+        if updated is None:  # pragma: no cover - guarded by the locked SELECT
+            raise NotFound(f"no incident with id {incident_id!r}")
+        return IncidentAcknowledgeResult(
+            item=Incident(**updated), changed=True, previous_status=previous
+        )
+
+    return await _in_write_transaction(pool, operation)
+
+
+async def create_incident_summary(
+    pool: AsyncConnectionPool, *, incident_id: str, summary: str
+) -> IncidentSummaryResult:
+    """Create or overwrite ``incidents.summary`` for one incident.
+
+    The input is trimmed and bounded. An identical summary is a no-op. Writes
+    are serialized with ``SELECT ... FOR UPDATE``; concurrent callers therefore
+    apply last-writer-wins without touching any other incident field.
+    """
+
+    text = require_summary(summary)
+
+    async def operation(conn: AsyncConnection[dict[str, Any]]) -> IncidentSummaryResult:
+        cur = await conn.execute(
+            f"SELECT {_INCIDENT_COLUMNS} FROM incidents WHERE id = %(id)s FOR UPDATE",
+            {"id": incident_id},
+        )
+        row = await cur.fetchone()
+        if row is None:
+            raise NotFound(f"no incident with id {incident_id!r}")
+
+        previous_present = row["summary"] is not None
+        if row["summary"] == text:
+            return IncidentSummaryResult(
+                item=Incident(**row),
+                changed=False,
+                previous_summary_present=previous_present,
+            )
+
+        cur = await conn.execute(
+            f"UPDATE incidents SET summary = %(summary)s WHERE id = %(id)s "
+            f"RETURNING {_INCIDENT_COLUMNS}",
+            {"id": incident_id, "summary": text},
+        )
+        updated = await cur.fetchone()
+        if updated is None:  # pragma: no cover - guarded by the locked SELECT
+            raise NotFound(f"no incident with id {incident_id!r}")
+        return IncidentSummaryResult(
+            item=Incident(**updated),
+            changed=True,
+            previous_summary_present=previous_present,
+        )
+
+    return await _in_write_transaction(pool, operation)
 
 
 # --- deploys ----------------------------------------------------------------

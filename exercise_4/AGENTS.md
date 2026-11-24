@@ -1,10 +1,27 @@
 # Create MCP-cerver for on-call engineer.
 
 ## Objective and scope
+Build a local MCP server with exactly nine tools:
+seven read-only diagnostic tools and two explicitly
+authorized write tools.
 
-Build a local, read-only Model Context Protocol (MCP) server to support an on-call engineer investigating incidents in the service described by ./lesson_4/README.md. The intended client is OpenCode.
+Only the following database mutations are permitted:
+- `incident_acknowledge`: update the incident status.
+- `incident_create_summary`: update `incidents.summary`.
 
-The server provides diagnostic data only. It must not remediate incidents, trigger deployments, edit runbooks, change the observed service, write to its databases, or execute user-supplied SQL or shell commands. Do not add tools beyond the seven listed below unless approved.
+All other database mutations, deployments, remediation,
+runbook modifications, and arbitrary SQL or shell
+execution are prohibited.
+
+The source of truth for the observed service is
+`./lesson_4/README.md`, together with the actual
+database schema, Docker Compose configuration,
+and runbooks.
+
+Inspect these sources before implementation.
+Do not invent schema fields, statuses, or data sources.
+If required database fields are missing, report
+the blocker instead of modifying the schema.
 
 ## Stack and runtime
 - Python 3.12, `uv`, Pydantic, and the standalone `fastmcp` package (`from fastmcp import FastMCP`). Do not silently switch to `mcp.server.fastmcp.FastMCP`, which is a different import path.
@@ -19,11 +36,29 @@ The server provides diagnostic data only. It must not remediate incidents, trigg
     "servers": {
       "oncall": {
         "type": "local",
-        "command": ["uv", "run", "python", "-m", "oncall_mcp"],
+        "command": [
+          "uv",
+          "run",
+          "python",
+          "-m",
+          "oncall_mcp"
+        ],
         "cwd": "."
       }
     }
-  }
+  },
+  "permissions": [
+    {
+      "action": "oncall_incident_acknowledge",
+      "resource": "*",
+      "effect": "ask"
+    },
+    {
+      "action": "oncall_incident_create_summary",
+      "resource": "*",
+      "effect": "ask"
+    }
+  ]
 }
 ```
 
@@ -38,7 +73,17 @@ Confirm the config against the installed OpenCode version and the actual project
 * Acquire connections from the pool for individual database operations and release them back to the pool after use.
 * Close the pool gracefully during server shutdown.
 * Configure pool minimum and maximum sizes, acquisition timeout, and connection timeout through settings with documented defaults.
-* Use a PostgreSQL role with read-only permissions.
+
+### Database permissions
+
+- Use exactly one PostgreSQL connection pool per process.
+- Use a database role with SELECT permissions on required
+  tables and narrowly scoped UPDATE permissions for
+  authorized incident fields only.
+- Execute all seven read tools in read-only transactions.
+- Execute write operations in explicit transactions.
+- Verify that unrelated tables and columns cannot be
+  modified using the configured database role.
 
 ### STDIO and secrets safety
 * The MCP server must use stdio transport only.
@@ -55,7 +100,7 @@ Confirm the config against the installed OpenCode version and the actual project
 * Verify that missing or invalid DATABASE_URL produces a controlled startup error without exposing secrets.
 * Verify that .env is not committed to version control.
 
-## Public tools - exact requested names
+## Public read tools - exact requested names
 
 Implement the following seven tools. Tool names must remain unique and domain-prefixed. Each must have an explicit title, a description explaining what it does, when to use it, and its read-only restrictions, plus validated input and structured output schemas.
 
@@ -68,6 +113,33 @@ Implement the following seven tools. Tool names must remain unique and domain-pr
 | `metrics_latency` | `(endpoint, time_range, bucket?)` | Return per-time-bucket request count, average latency, p95 latency, and cache-hit percentage from request logs. |
 | `runbook_get` | `(service)` | Read `lesson_4/runbooks/<service>.md`. |
 | `service_catalog_get` | `(service)` | Return the service's team, on-call ownership, and dependencies. |
+
+
+## Public write tools - exact requested names
+
+Implement exactly two additional state-changing tools.
+Together with the seven read tools, the MCP server must
+expose exactly nine tools.
+
+| Tool | Input signature | Responsibility |
+| --- | --- | --- |
+| `incident_acknowledge` | `(incident_id)` | Change the incident status to `acknowledged`, subject to documented and validated status transitions. |
+| `incident_create_summary` | `(incident_id, summary)` | Save the provided analysis summary to `incidents.summary`, following a documented overwrite policy. |
+
+Requirements:
+- Both write tools MUST have explicit titles, descriptions, validated input schemas, and structured output schemas.
+- Both tools MUST explicitly declare `readOnlyHint: false`.
+- Both tools MUST explicitly declare `destructiveHint: true`.
+- Tool descriptions MUST state that the operation modifies database state.
+- Validate all inputs using Pydantic.
+- Use parameterized SQL and database transactions.
+- Restrict writes to the explicitly permitted incident fields.
+- Define behavior for missing incidents, invalid transitions, repeated calls, and concurrent updates.
+- Return structured results indicating the outcome.
+- Never execute arbitrary SQL provided by the client.
+- Add automated tests verifying the intended changes and the absence of unintended modifications.
+- Write-tool invocations MUST require explicit user approval in the OpenCode client configuration.
+- MCP annotations alone MUST NOT be treated as authorization or access-control mechanisms.
 
 ## Input contracts to settle and document
 
@@ -87,23 +159,21 @@ Implement the following seven tools. Tool names must remain unique and domain-pr
 - For `metrics_latency`, return bucket start/end, request count, average latency, p95 latency, and cache-hit percentage. Document the latency unit, p95 percentile definition (exact/approximate and interpolation method), cache-hit source field, treatment of missing values, bucket alignment, and treatment of empty buckets. Test all of these against known fixtures.
 - Limit response size and do not leak credentials, connection strings, or sensitive log contents beyond the scope of the on-call use case.
 
-## Read-only and security invariants
+## Security invariants
 
-- All database operations must be parameterized and restricted to allowlisted tables/fields. Do not expose generic `query(sql)`, arbitrary file access, code execution, or shell execution.
-- Enforce read-only access at the data-source level where supported (for example, a read-only DB connection/account); don't rely solely on tool descriptions or MCP annotations.
-- Declare appropriate MCP tool annotations, including `readOnlyHint: true`; understand that annotations are hints, not a security boundary.
-- Apply bounds to time ranges, result counts, and expensive aggregations. Make database connectivity and paths configurable without embedding secrets in the repository.
-- Tool calls must never start the simulator, mutate sample data, run migrations, or change the observed service.
-- Sanitize error messages: useful to the caller, but without revealing secrets or stack traces. Use stderr for developer diagnostics.
+- Seven read tools MUST declare `readOnlyHint: true`.
+- Two write tools MUST declare `readOnlyHint: false` and `destructiveHint: true`.
+- Read tools MUST NOT modify database state.
+- Write tools MUST modify only explicitly authorized incident fields.
+- Tools MUST NOT start the simulator, run migrations, or perform unrelated state changes.
+- All SQL queries executed by any tool MUST use parameterized statements.
+- Never construct SQL queries by concatenating untrusted input.
+- Restrict dynamic SQL identifiers to explicit allowlists.
 
 ## Architecture and implementation order
 
-1. Document the discovered data model and make a tool-to-source mapping.
-2. Implement validated domain-specific repository/query functions separately from MCP decorators. Keep SQL out of tool input parameters.
-3. Implement typed input/output models and domain error mapping.
-4. Implement seven thin MCP tools calling the repository functions.
-5. Add test fixtures and tests, then a reproducible launch command and OpenCode configuration.
-6. Keep the new MCP implementation isolated from `lesson_4` unless a narrowly documented integration change is necessary. Avoid unrelated refactoring.
+Implement nine thin MCP tools:
+seven read-only and two state-changing.
 
 Suggested package layout (adapt to existing repository conventions):
 
@@ -125,25 +195,29 @@ README.md
 ```
 
 ## Verification and tests
-
-- Establish exactly how the observed service is initialized. The existing instruction is `cd lesson_4 && docker compose run --rm simulator`, but inspect Compose and document what that command actually starts, writes, and leaves running before relying on it.
-- Add automated tests with deterministic fixtures. Cover every tool's normal result, no matches, missing IDs/files, invalid service/level/status/severity, invalid or oversized time range, query limits, unavailable data source, and injection/path-traversal attempts.
-- For `metrics_latency`, test a known sequence of requests with explicit expected count, average, p95, cache-hit percentage, bucket boundaries, and empty-bucket behavior.
-- Prove the read-only invariant by verifying that MCP tool calls do not alter the observed database, runbooks, or other monitored files.
-- Test MCP initialization, `tools/list` (all seven tools with correct names, descriptions and schemas), and `tools/call` via MCP Inspector, including CLI tests suitable for a coding agent.
-- Test the actual OpenCode connection and an end-to-end on-call diagnostic workflow, not just Inspector.
-- Use `uv run pytest` for automated tests; document any additional lint/type-check commands actually configured in the project.
+- Verify exactly nine tools through MCP `tools/list`.
+- Test all tools through MCP Inspector.
+- Run automated tests using `uv run pytest`.
+- Use deterministic test fixtures.
+- Verify that all read tools preserve database state.
+- Verify that write tools modify only authorized fields.
+- Test invalid inputs, nonexistent incidents, repeated
+  writes, concurrent updates, and database failures.
+- Verify PostgreSQL pool reuse and graceful shutdown.
+- Verify stdout contains only MCP protocol messages.
+- Test connection and tool execution from OpenCode.
+- Test metrics against known expected values.
 
 ## Definition of done
-
-- Seven requested tools are discoverable and callable over MCP stdio from OpenCode.
-- Every tool uses actual observed-service data; no fabricated success paths or stub output remain.
-- Inputs and outputs are documented and validated; error cases are predictable.
-- Metrics aggregation matches documented formulas and deterministic test expectations.
-- Tool calls are read-only, bounded, and safe against SQL/file path injection.
-- A fresh checkout can install dependencies, initialize the required test data, run tests, start the MCP server, and connect it to OpenCode using documented commands.
-- The implementation includes a README with prerequisites, configuration, startup, testing, troubleshooting, and a brief example of an on-call investigation.
-- Deliver a final summary of files changed, commands run, test results, unresolved assumptions, and any deviations from this brief.
+- All nine tools are discoverable and callable from OpenCode.
+- All tools operate on real observed-service data.
+- No stub implementations remain.
+- All read/write restrictions are enforced and tested.
+- Automated tests pass.
+- The project includes reproducible setup and launch
+  commands, .env.example, and README documentation.
+- The agent reports changed files, test results,
+  and unresolved assumptions.
 
 ## Open decisions - do not silently guess
 

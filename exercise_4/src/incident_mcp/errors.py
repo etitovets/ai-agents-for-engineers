@@ -33,6 +33,12 @@ class NotFound(DomainError):
     code = "not_found"
 
 
+class InvalidTransition(DomainError):
+    """The requested state change is not allowed from the current state."""
+
+    code = "invalid_transition"
+
+
 class DataSourceUnavailable(DomainError):
     """Postgres or the runbook directory cannot be read right now."""
 

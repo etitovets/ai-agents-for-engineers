@@ -85,13 +85,17 @@ service data rather than logs. **No tool exposes it.**
 | --- | --- | --- |
 | `incidents_search` | `incidents` | filter + order + limit, `limit+1` probe for `has_more` |
 | `incident_get` | `incidents` | by primary key |
+| `incident_acknowledge` | `incidents` | write: `UPDATE ... SET status` only, row locked |
+| `incident_create_summary` | `incidents` | write: `UPDATE ... SET summary` only, row locked |
 | `deploys_recent` | `deploys` | `ORDER BY deployed_at DESC, id DESC` |
 | `logs_query` | `app_logs` | half-open `ts` window, optional level, literal substring |
 | `metrics_latency` | `request_logs` | `date_bin` aggregation + `generate_series` fill |
 | `runbook_get` | filesystem | `lesson_4/runbooks/<service>.md` |
 | `service_catalog_get` | `services` | by primary key |
 
-No other table is reachable. No tool accepts a table name, column name, or SQL fragment.
+No other table is reachable. The two write tools may only change `incidents.status` and
+`incidents.summary`; every other table and every other incident column is read-only. No tool accepts
+a table name, column name, or SQL fragment.
 
 ## Service vocabulary (the central ambiguity)
 
@@ -123,6 +127,49 @@ requires `service` and allowlists two endpoints:
 `/health` is excluded: it is a liveness probe with no diagnostic value and no cache-hit data.
 A regression test inserts a `checkout` row on the price endpoint and asserts it never appears in
 `payments-api` metrics.
+
+## Write tools
+
+Both writes use one explicit transaction on the process-wide pool:
+
+```sql
+BEGIN;
+SET TRANSACTION READ WRITE;
+SELECT ... FROM incidents WHERE id = %(id)s FOR UPDATE;
+-- validate, then
+UPDATE incidents SET <authorized column> = %(value)s WHERE id = %(id)s RETURNING ...;
+COMMIT;
+```
+
+The row lock serializes concurrent calls for the same incident. Pooled connections keep
+`default_transaction_read_only = on`; only these transactions switch to read-write. The database role
+is the hard boundary and has `UPDATE` only on `incidents.status` and `incidents.summary`.
+
+### `incident_acknowledge`
+
+| Current status | Result |
+| --- | --- |
+| `open` | `status = acknowledged`, `changed = true`, `previous_status = open` |
+| `acknowledged` | no update, `changed = false`, `previous_status = acknowledged` |
+| `resolved` | `invalid_transition`, nothing changed |
+| missing ID | `not_found` |
+
+Only `incidents.status` is written. The updated incident is returned as `item`, together with
+`changed` and `previous_status`.
+
+### `incident_create_summary`
+
+- Input is trimmed; empty/whitespace-only summaries are rejected with `invalid_arguments`.
+- Maximum length is **5 000 characters** after trimming.
+- Any incident status may receive a summary.
+- A missing summary is created (`changed = true`, `previous_summary_present = false`).
+- An existing summary is overwritten (`changed = true`, `previous_summary_present = true`).
+- An identical summary is a no-op (`changed = false`, `previous_summary_present = true`).
+- Concurrent writes are serialized by `SELECT ... FOR UPDATE`; last writer wins.
+- The updated incident is returned as `item`, together with `changed` and
+  `previous_summary_present`.
+
+Only `incidents.summary` is written.
 
 ## Aggregation contract for `metrics_latency`
 
@@ -167,6 +214,9 @@ Source names are preserved. Documented transformations:
 | `cache_hit_pct` | derived | nullable float, 2 decimals |
 | `severity`, `status` | `TEXT` | enums (`Severity`, `IncidentStatus`) |
 | `level` (output) | `TEXT` | plain string, so unexpected stored values never fail a read |
+| `changed` (write tools) | derived | `true` only when a row was actually updated |
+| `previous_status` | pre-write `incidents.status` | returned by `incident_acknowledge` |
+| `previous_summary_present` | pre-write `incidents.summary IS NOT NULL` | returned by `incident_create_summary` |
 
 ## `logs_query.query` semantics
 
@@ -179,27 +229,32 @@ whitespace is trimmed and an empty string means "no filter".
 
 | Code | Meaning |
 | --- | --- |
-| `invalid_arguments` | caller value outside the contract (service, endpoint, enum, range, bucket count, query length) |
+| `invalid_arguments` | caller value outside the contract (service, endpoint, enum, range, bucket count, query/summary length) |
 | `not_found` | validated identifier absent (`INC-999`, missing runbook file) |
-| `data_source_unavailable` | pool timeout, database error, unreadable runbook directory |
+| `invalid_transition` | requested incident state change is not allowed from the current status |
+| `data_source_unavailable` | pool timeout, database error, write permission denied, unreadable runbook directory |
 | `internal_error` | unexpected fault; details only on stderr |
 
 Zero matches is a success: `items: []`, `count: 0`. Error text is static and never contains the DSN,
 SQL, stack traces, or file paths.
 
-## Read-only model
+## Access model
 
 - Every connection is configured with `default_transaction_read_only = on` (and a statement
-  timeout) in the pool's `configure` hook; connections run in autocommit mode, so every statement is
-  a read-only transaction.
+  timeout) in the pool's `configure` hook; connections run in autocommit mode, so all seven read
+  tools run under read-only transactions.
+- The two write tools open an explicit transaction and execute `SET TRANSACTION READ WRITE` before a
+  parameterized `UPDATE`. They then commit or roll back that single transaction.
 - The pool is created once per process, opened in the MCP lifespan, reused by all tools, and closed
-  on shutdown.
-- Recommended deployment uses a `SELECT`-only role (see README). The stand's `oncall` role is a
+  on shutdown. There is no second pool for writes.
+- Recommended deployment uses the restricted `incident_mcp` role (see README): `SELECT` on the
+  diagnostic tables plus `UPDATE (status, summary)` on `incidents`. The stand's `oncall` role is a
   local convenience only.
 - `runbook_get` validates against the catalog allowlist, rejects symlinks, resolves the path, and
   requires the result to stay inside `lesson_4/runbooks/`.
-- `tests/test_read_only.py` proves table counts and runbook hashes are unchanged after every tool
-  runs, and that `INSERT`/`UPDATE`/`DELETE`/`CREATE TABLE` raise `ReadOnlySqlTransaction`.
+- `tests/test_read_only.py` proves table counts and runbook hashes are unchanged after every read
+  tool, that write tools change only the target incident's authorized field, and that a
+  column-scoped role cannot modify unrelated columns or tables.
 
 ## Assumptions and open items
 
@@ -209,4 +264,6 @@ SQL, stack traces, or file paths.
   two are observed, `ERROR` is the conventional third level.
 - Service names, endpoints, and runbook names are hard-coded allowlists. If the stand gains a new
   service, `models.py` must be updated and the tests extended.
+- Incident writes are deliberately limited to acknowledgement and summary. There is no resolve,
+  reopen, severity, owner, or title write tool, and no incident creation or deletion.
 - `price_events` is out of scope by design.

@@ -1,8 +1,10 @@
-"""The seven MCP tools, thin wrappers over :mod:`oncall_mcp.repositories`.
+"""The nine MCP tools, thin wrappers over :mod:`incident_mcp.repositories`.
 
-Each tool declares an explicit title, a description that states what it does,
-when to use it, and its read-only restriction, plus a Pydantic output model so
-clients receive structured content alongside text.
+Seven diagnostic tools are read-only. Two explicitly authorized tools may write
+only ``incidents.status`` and ``incidents.summary``. Each tool declares an
+explicit title, a description that states what it does, when to use it, and its
+access semantics, plus a Pydantic output model so clients receive structured
+content alongside text.
 """
 
 from __future__ import annotations
@@ -35,15 +37,18 @@ from .models import (
     METRIC_SERVICES,
     Bucket,
     DeploysResult,
+    IncidentAcknowledgeResult,
     IncidentResult,
     IncidentsResult,
     IncidentStatus,
+    IncidentSummaryResult,
     LatencyResult,
     LogLevel,
     LogsResult,
     RunbookResult,
     ServiceCatalogResult,
     Severity,
+    SummaryText,
     TimeRange,
     require_endpoint,
     require_query,
@@ -56,12 +61,14 @@ from .settings import Settings
 logger = logging.getLogger(__name__)
 
 SERVER_INSTRUCTIONS = """\
-Read-only diagnostic server for the incident-stand on-call workflow.
+Diagnostic and incident-state server for the incident-stand on-call workflow.
 
-It answers questions about incidents, deployments, application logs, request
-latency, runbooks, and service ownership. It never writes to the database,
-never runs user-supplied SQL or shell commands, and never reads files outside
-the runbooks directory.
+Seven tools are read-only: incidents, deployments, application logs, request
+latency, runbooks, and service ownership. Two tools intentionally modify
+database state: `incident_acknowledge` changes `incidents.status` and
+`incident_create_summary` changes `incidents.summary`. No other writes,
+deployments, migrations, or arbitrary SQL/shell commands are possible. Writes
+modify only those two incident fields and require explicit client approval.
 
 Service identifiers are exposed verbatim, exactly as stored: the catalog,
 incidents, deployments, and runbooks use `payments`, `checkout`, `auth`; logs
@@ -75,11 +82,11 @@ filter" for incidents.
 """
 
 
-def _annotations(title: str) -> ToolAnnotations:
+def _annotations(title: str, *, read_only: bool = True) -> ToolAnnotations:
     return ToolAnnotations(
         title=title,
-        read_only_hint=True,
-        destructive_hint=False,
+        read_only_hint=read_only,
+        destructive_hint=not read_only,
         idempotent_hint=True,
         open_world_hint=False,
     )
@@ -122,7 +129,7 @@ def create_server(settings: Settings, *, runtime: StandRuntime | None = None) ->
             await rt.stop()
 
     mcp = FastMCP(
-        name="oncall",
+        name="incident-mcp",
         instructions=SERVER_INSTRUCTIONS,
         lifespan=lifespan,
         mask_error_details=True,
@@ -207,6 +214,70 @@ def create_server(settings: Settings, *, runtime: StandRuntime | None = None) ->
 
         async def _work() -> IncidentResult:
             return await repositories.get_incident(rt.pool, incident_id=incident_id)
+
+        return await _guard(_work())
+
+    @mcp.tool(
+        name="incident_acknowledge",
+        title="Acknowledge incident",
+        description=(
+            "MODIFIES DATABASE STATE: change an incident's status to acknowledged. "
+            "Use it when the on-call engineer takes ownership of an open incident. "
+            "Allowed transitions: open -> acknowledged. Repeated acknowledgement of "
+            "an already acknowledged incident is an idempotent success with "
+            "changed=false; a resolved incident is rejected with invalid_transition. "
+            "Only incidents.status is written. The client must require explicit "
+            "approval before this tool runs."
+        ),
+        annotations=_annotations("Acknowledge incident", read_only=False),
+    )
+    async def incident_acknowledge(
+        ctx: Context,
+        incident_id: Annotated[
+            str,
+            Field(
+                pattern=INCIDENT_ID_PATTERN,
+                description="Incident identifier such as INC-001.",
+            ),
+        ],
+    ) -> IncidentAcknowledgeResult:
+        rt = _runtime(ctx)
+
+        async def _work() -> IncidentAcknowledgeResult:
+            return await repositories.acknowledge_incident(rt.pool, incident_id=incident_id)
+
+        return await _guard(_work())
+
+    @mcp.tool(
+        name="incident_create_summary",
+        title="Create or overwrite incident summary",
+        description=(
+            "MODIFIES DATABASE STATE: save the supplied analysis summary to "
+            "incidents.summary. The summary is trimmed, must be 1-5000 characters, "
+            "and may be written for an incident in any status. An existing summary "
+            "is overwritten; an identical summary is an idempotent success with "
+            "changed=false. Only incidents.summary is written. The client must "
+            "require explicit approval before this tool runs."
+        ),
+        annotations=_annotations("Create or overwrite incident summary", read_only=False),
+    )
+    async def incident_create_summary(
+        ctx: Context,
+        incident_id: Annotated[
+            str,
+            Field(
+                pattern=INCIDENT_ID_PATTERN,
+                description="Incident identifier such as INC-001.",
+            ),
+        ],
+        summary: SummaryText,
+    ) -> IncidentSummaryResult:
+        rt = _runtime(ctx)
+
+        async def _work() -> IncidentSummaryResult:
+            return await repositories.create_incident_summary(
+                rt.pool, incident_id=incident_id, summary=summary
+            )
 
         return await _guard(_work())
 

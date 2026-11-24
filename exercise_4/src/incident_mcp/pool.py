@@ -2,7 +2,9 @@
 
 The pool is created once, opened during MCP startup, reused by every tool call,
 and closed on shutdown. Each connection is configured read-only at the session
-level, so a bug in a query cannot turn a diagnostic tool into a writer.
+level. Only the two authorized write repositories open an explicit transaction
+and switch that single transaction to read-write; the database role restricts
+those writes to ``incidents.status`` and ``incidents.summary``.
 """
 
 from __future__ import annotations
@@ -47,12 +49,12 @@ def create_pool(settings: Settings) -> AsyncConnectionPool:
         kwargs={
             "connect_timeout": settings.db_connect_timeout,
             "row_factory": dict_row,
-            "application_name": "oncall-mcp",
+            "application_name": "incident-mcp",
             # Autocommit keeps the session out of idle transactions and lets the
             # read-only default apply to every implicit transaction.
             "autocommit": True,
         },
         configure=_configure_connection(settings),
         open=False,
-        name="oncall-mcp",
+        name="incident-mcp",
     )

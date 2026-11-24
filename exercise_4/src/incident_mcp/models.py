@@ -10,8 +10,16 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from math import ceil
+from typing import Annotated
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
 
 from .errors import InvalidArguments
 
@@ -36,6 +44,13 @@ DEPLOY_LIMIT_MAX = 50
 MAX_QUERY_CHARS = 200
 MAX_MESSAGE_CHARS = 2_000
 MAX_RUNBOOK_BYTES = 65_536
+MAX_SUMMARY_CHARS = 5_000
+
+SummaryText = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_SUMMARY_CHARS),
+    Field(description="Incident analysis summary; trimmed, 1-5000 characters."),
+]
 
 # --- Buckets ----------------------------------------------------------------
 
@@ -149,6 +164,17 @@ def require_query(value: str | None) -> str | None:
         return None
     if len(text) > MAX_QUERY_CHARS:
         raise InvalidArguments(f"query is longer than {MAX_QUERY_CHARS} characters")
+    return text
+
+
+def require_summary(value: str) -> str:
+    """Normalize and validate an incident summary before it is stored."""
+
+    text = value.strip()
+    if not text:
+        raise InvalidArguments("summary must not be empty")
+    if len(text) > MAX_SUMMARY_CHARS:
+        raise InvalidArguments(f"summary is longer than {MAX_SUMMARY_CHARS} characters")
     return text
 
 
@@ -294,6 +320,18 @@ class IncidentResult(BaseModel):
     item: Incident
 
 
+class IncidentAcknowledgeResult(BaseModel):
+    item: Incident
+    changed: bool
+    previous_status: IncidentStatus
+
+
+class IncidentSummaryResult(BaseModel):
+    item: Incident
+    changed: bool
+    previous_summary_present: bool
+
+
 class DeploysResult(BaseModel):
     items: list[Deploy]
     count: int
@@ -348,14 +386,17 @@ __all__ = [
     "MAX_METRIC_WINDOW",
     "MAX_QUERY_CHARS",
     "MAX_RUNBOOK_BYTES",
+    "MAX_SUMMARY_CHARS",
     "METRIC_ENDPOINTS",
     "METRIC_SERVICES",
     "Bucket",
     "Deploy",
     "DeploysResult",
     "Incident",
+    "IncidentAcknowledgeResult",
     "IncidentResult",
     "IncidentStatus",
+    "IncidentSummaryResult",
     "IncidentsResult",
     "LatencyBucket",
     "LatencyResult",
@@ -367,11 +408,13 @@ __all__ = [
     "ServiceCatalogEntry",
     "ServiceCatalogResult",
     "Severity",
+    "SummaryText",
     "TimeRange",
     "TimeRangeOut",
     "bucket_count",
     "require_endpoint",
     "require_query",
     "require_service",
+    "require_summary",
     "resolve_window",
 ]

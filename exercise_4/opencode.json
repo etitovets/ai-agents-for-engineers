@@ -2,13 +2,26 @@
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
     "servers": {
-      "oncall": {
+      "incident-mcp": {
         "type": "local",
-        "command": ["uv", "run", "python", "-m", "oncall_mcp"],
+        "command": ["uv", "run", "incident-mcp"],
         "cwd": ".",
-        "enabled": true,
-        "timeout": 15000
+        "timeout": {
+          "startup": 15000
+        }
       }
     }
-  }
+  },
+  "permissions": [
+    {
+      "action": "incident-mcp_incident_acknowledge",
+      "resource": "*",
+      "effect": "ask"
+    },
+    {
+      "action": "incident-mcp_incident_create_summary",
+      "resource": "*",
+      "effect": "ask"
+    }
+  ]
 }

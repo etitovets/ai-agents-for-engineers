@@ -1,6 +1,6 @@
 """Deterministic fixtures for the MCP server tests.
 
-The suite creates a throwaway database (``oncall_mcp_test``) on the incident
+The suite creates a throwaway database (``incident_mcp_test``) on the incident
 stand's Postgres instance, applies ``lesson_4/db/init.sql``, and seeds a fixed
 data set. It never touches the stand's own ``oncall`` database, so running the
 tests cannot alter observed data.
@@ -24,17 +24,17 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-from oncall_mcp.runtime import StandRuntime
-from oncall_mcp.settings import Settings
+from incident_mcp.runtime import StandRuntime
+from incident_mcp.settings import Settings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LESSON_DIR = PROJECT_ROOT / "lesson_4"
 RUNBOOKS_DIR = LESSON_DIR / "runbooks"
 
 ADMIN_DSN = os.environ.get(
-    "ONCALL_TEST_ADMIN_DSN", "postgresql://oncall:oncall@localhost:5433/oncall"
+    "INCIDENT_TEST_ADMIN_DSN", "postgresql://oncall:oncall@localhost:5433/oncall"
 )
-TEST_DB = os.environ.get("ONCALL_TEST_DB", "oncall_mcp_test")
+TEST_DB = os.environ.get("INCIDENT_TEST_DB", "incident_mcp_test")
 
 # Fixed historical window used by the metrics and boundary tests.
 FIXED_START = datetime(2026, 7, 28, 9, 40, tzinfo=UTC)
@@ -58,6 +58,13 @@ SERVICES = [
     ),
     ("checkout", "storefront", "m.orlova", ["payments", "catalog"], "Checkout."),
     ("auth", "platform", "d.sokolov", ["postgres-main", "redis-sessions"], "Auth."),
+]
+
+INITIAL_INCIDENT_STATE = [
+    ("INC-001", "open", None),
+    ("INC-002", "resolved", "Network blip."),
+    ("INC-003", "resolved", "Rotated."),
+    ("INC-004", "acknowledged", "Failover completed."),
 ]
 
 
@@ -466,7 +473,7 @@ def test_dsn(seed_clock: datetime) -> Iterator[str]:
 
     dsn = psycopg.conninfo.make_conninfo(ADMIN_DSN, dbname=TEST_DB)
     if not dsn.startswith("postgresql://"):
-        # ONCALL_TEST_ADMIN_DSN may use libpq keyword form; rebuild a URL DSN.
+        # INCIDENT_TEST_ADMIN_DSN may use libpq keyword form; rebuild a URL DSN.
         parts = urlsplit(ADMIN_DSN)
         dsn = urlunsplit(parts._replace(path=f"/{TEST_DB}"))
     with psycopg.connect(dsn) as conn:
@@ -480,6 +487,54 @@ def test_dsn(seed_clock: datetime) -> Iterator[str]:
         cleanup.execute(
             sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(TEST_DB))
         )
+
+
+@pytest.fixture
+def reset_incident_state(test_dsn: str) -> Iterator[None]:
+    """Restore the seeded incident rows around a write test.
+
+    Write tests intentionally change incident state. Restoring the known seed
+    keeps later tests independent without truncating unrelated tables.
+    """
+
+    def reset() -> None:
+        with psycopg.connect(test_dsn) as conn:
+            for incident_id, status, summary in INITIAL_INCIDENT_STATE:
+                conn.execute(
+                    "UPDATE incidents SET status = %s, summary = %s WHERE id = %s",
+                    (status, summary, incident_id),
+                )
+
+    reset()
+    yield
+    reset()
+
+
+@pytest.fixture(scope="session")
+def restricted_role(test_dsn: str) -> Iterator[str]:
+    """A throwaway role with SELECT plus column-level UPDATE on incidents."""
+
+    role = f"incident_mcp_test_{os.getpid()}"
+
+    with psycopg.connect(test_dsn, autocommit=True) as conn:
+        conn.execute(sql.SQL("CREATE ROLE {} NOLOGIN").format(sql.Identifier(role)))
+        conn.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(sql.Identifier(role)))
+        conn.execute(
+            sql.SQL(
+                "GRANT SELECT ON services, deploys, incidents, request_logs, app_logs TO {}"
+            ).format(sql.Identifier(role))
+        )
+        conn.execute(
+            sql.SQL("GRANT UPDATE (status, summary) ON incidents TO {}").format(
+                sql.Identifier(role)
+            )
+        )
+
+    yield role
+
+    with psycopg.connect(test_dsn, autocommit=True) as conn:
+        conn.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(role)))
+        conn.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
 
 
 @pytest.fixture
@@ -525,7 +580,7 @@ async def client(runtime: StandRuntime):
 
     from fastmcp import Client
 
-    from oncall_mcp.server import create_server
+    from incident_mcp.server import create_server
 
     server = create_server(runtime.settings, runtime=runtime)
     async with Client(server) as connected:

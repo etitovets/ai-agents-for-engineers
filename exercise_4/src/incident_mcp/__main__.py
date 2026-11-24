@@ -1,4 +1,4 @@
-"""Entry point: ``uv run python -m oncall_mcp``.
+"""Entry point: ``uv run incident-mcp`` or ``uv run python -m incident_mcp``.
 
 stdout is reserved for MCP protocol frames. Every log record, including startup
 failures, goes to stderr.
@@ -25,7 +25,7 @@ def configure_logging() -> None:
 
 def main() -> int:
     configure_logging()
-    logger = logging.getLogger("oncall_mcp")
+    logger = logging.getLogger("incident_mcp")
 
     try:
         settings = load_settings()

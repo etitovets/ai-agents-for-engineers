@@ -8,13 +8,13 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 
-from oncall_mcp.models import (
+from incident_mcp.models import (
     DEFAULT_WINDOW,
     MAX_LOG_WINDOW,
     TimeRange,
     resolve_window,
 )
-from oncall_mcp.settings import ConfigurationError, Settings, load_settings
+from incident_mcp.settings import ConfigurationError, Settings, load_settings
 from tests.conftest import PROJECT_ROOT
 
 VALID_DSN = "postgresql://alice:s3cret@db.example:5432/oncall"

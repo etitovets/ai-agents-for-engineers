@@ -1,4 +1,4 @@
-"""Contract tests for the seven MCP tools, exercised through a real client."""
+"""Contract tests for the nine MCP tools, exercised through a real client."""
 
 from __future__ import annotations
 
@@ -8,10 +8,10 @@ import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
-from oncall_mcp.runtime import StandRuntime
+from incident_mcp.runtime import StandRuntime
 from tests.conftest import CATALOG_ENDPOINT, FIXED_END, FIXED_START, INJECTION_TEXT
 
-EXPECTED_TOOLS = {
+READ_TOOLS = {
     "incidents_search",
     "incident_get",
     "deploys_recent",
@@ -20,6 +20,13 @@ EXPECTED_TOOLS = {
     "runbook_get",
     "service_catalog_get",
 }
+
+WRITE_TOOLS = {
+    "incident_acknowledge",
+    "incident_create_summary",
+}
+
+EXPECTED_TOOLS = READ_TOOLS | WRITE_TOOLS
 
 
 def window(start: datetime, end: datetime) -> dict[str, str]:
@@ -35,24 +42,47 @@ async def call(client: Client, name: str, arguments: dict) -> dict:
 # --- discovery --------------------------------------------------------------
 
 
-async def test_all_seven_tools_are_discoverable_with_titles(client: Client) -> None:
+async def test_all_nine_tools_are_discoverable_with_titles(client: Client) -> None:
     tools = await client.list_tools()
     by_name = {tool.name: tool for tool in tools}
 
     assert set(by_name) == EXPECTED_TOOLS
-    for name, tool in by_name.items():
+    assert len(by_name) == 9
+
+    for name in READ_TOOLS:
+        tool = by_name[name]
         assert tool.title, f"{name} has no title"
         assert tool.description and len(tool.description) > 80, f"{name} description too thin"
         assert "read-only" in tool.description.lower(), f"{name} does not state read-only"
         assert tool.annotations is not None
         assert tool.annotations.read_only_hint is True, f"{name} not marked readOnlyHint"
+        assert tool.annotations.destructive_hint is False, f"{name} marked destructive"
+        schema = getattr(tool, "input_schema", None) or getattr(tool, "inputSchema", None)
+        assert schema and schema.get("type") == "object", f"{name} has no input schema"
+
+    for name in WRITE_TOOLS:
+        tool = by_name[name]
+        assert tool.title, f"{name} has no title"
+        assert tool.description and len(tool.description) > 80, f"{name} description too thin"
+        assert "modifies database state" in tool.description.lower(), (
+            f"{name} does not state that it modifies database state"
+        )
+        assert tool.annotations is not None
+        assert tool.annotations.read_only_hint is False, f"{name} marked readOnlyHint"
+        assert tool.annotations.destructive_hint is True, f"{name} not marked destructiveHint"
         schema = getattr(tool, "input_schema", None) or getattr(tool, "inputSchema", None)
         assert schema and schema.get("type") == "object", f"{name} has no input schema"
 
 
 async def test_tool_outputs_have_schemas(client: Client) -> None:
     tools = {tool.name: tool for tool in await client.list_tools()}
-    for name in ("incidents_search", "metrics_latency", "runbook_get"):
+    for name in (
+        "incidents_search",
+        "metrics_latency",
+        "runbook_get",
+        "incident_acknowledge",
+        "incident_create_summary",
+    ):
         schema = getattr(tools[name], "output_schema", None) or getattr(
             tools[name], "outputSchema", None
         )

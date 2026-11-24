@@ -23,6 +23,8 @@ EXPECTED_TOOLS = {
     "metrics_latency",
     "runbook_get",
     "service_catalog_get",
+    "incident_acknowledge",
+    "incident_create_summary",
 }
 
 
@@ -39,7 +41,7 @@ def run_server(
     payload: str, env: dict[str, str], *, cwd: Path = PROJECT_ROOT, timeout: float = 60.0
 ) -> tuple[int, str, str]:
     process = subprocess.Popen(
-        [sys.executable, "-m", "oncall_mcp"],
+        [sys.executable, "-m", "incident_mcp"],
         cwd=cwd,
         env=env,
         stdin=subprocess.PIPE,
@@ -60,7 +62,7 @@ def test_stdio_stdout_is_only_json_rpc(test_dsn: str) -> None:
     env = {
         **os.environ,
         "STAND_DATABASE_URL": test_dsn,
-        "ONCALL_RUNBOOKS_DIR": str(RUNBOOKS_DIR),
+        "INCIDENT_RUNBOOKS_DIR": str(RUNBOOKS_DIR),
         "PYTHONUNBUFFERED": "1",
     }
     messages = [
@@ -88,7 +90,7 @@ def test_stdio_stdout_is_only_json_rpc(test_dsn: str) -> None:
     ]
 
     process = subprocess.Popen(
-        [sys.executable, "-m", "oncall_mcp"],
+        [sys.executable, "-m", "incident_mcp"],
         cwd=PROJECT_ROOT,
         env=env,
         stdin=subprocess.PIPE,
@@ -142,7 +144,7 @@ def test_stdio_stdout_is_only_json_rpc(test_dsn: str) -> None:
     assert set(responses) == {1, 2, 3, 4}
     assert code == 0, stderr[-2000:]
 
-    assert responses[1]["result"]["serverInfo"]["name"] == "oncall"
+    assert responses[1]["result"]["serverInfo"]["name"] == "incident-mcp"
     tool_names = {tool["name"] for tool in responses[2]["result"]["tools"]}
     assert tool_names == EXPECTED_TOOLS
 
@@ -161,7 +163,7 @@ def test_stdio_stdout_is_only_json_rpc(test_dsn: str) -> None:
 
 def test_invalid_dsn_stops_with_a_controlled_error(tmp_path: Path) -> None:
     env = {**os.environ, "STAND_DATABASE_URL": "not-a-dsn"}
-    env.pop("ONCALL_RUNBOOKS_DIR", None)
+    env.pop("INCIDENT_RUNBOOKS_DIR", None)
 
     code, stdout, stderr = run_server("", env, cwd=tmp_path, timeout=30.0)
 

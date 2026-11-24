@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=(PROJECT_ROOT / ".env", Path.cwd() / ".env"),
         env_file_encoding="utf-8",
-        env_prefix="ONCALL_",
+        env_prefix="INCIDENT_",
         case_sensitive=False,
         extra="ignore",
         populate_by_name=True,
