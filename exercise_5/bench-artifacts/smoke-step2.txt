@@ -1,0 +1,11 @@
+
+=== smoke: launch-control:step2 ===
+
+  [32m✓[0m сервис поднялся и отвечает на /health
+  [32m✓[0m GET /health -> 200 (получено: 200)
+  [32m✓[0m GET /api/v1/launches -> 200, 5 объектов (код: 200, объектов: 5)
+  [32m✓[0m POST /api/v1/launches/LC-101/countdown -> 200, t_minus_seconds=600 (код: 200, t_minus: 600)
+  [32m✓[0m POST /api/v1/launches/LC-102/countdown -> 409 (получено: 409)
+
+  Готово: 5/5
+

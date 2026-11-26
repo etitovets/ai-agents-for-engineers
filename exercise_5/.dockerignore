@@ -1,0 +1,15 @@
+# Build context: app/, tests/ (baseline-шаг гоняет pytest), pyproject.toml, uv.lock.
+.git
+.gitignore
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+tools
+scripts
+*.md
+Dockerfile*
+.dockerignore
+.DS_Store
