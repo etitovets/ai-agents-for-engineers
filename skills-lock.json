@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "skills": {
+    "docker-build-strategies": {
+      "source": "docker/skills",
+      "commit": "fbcef37a595f1e0cc992524e31360b25f936706f",
+      "sourceType": "github",
+      "skillPath": "skills/docker-build-strategies/SKILL.md",
+      "computedHash": "a9cc5c3839d60ec8e7ca390292e1d4784bc69cf962413cb17364e7b5a46783e1"
+    }
+  }
+}
